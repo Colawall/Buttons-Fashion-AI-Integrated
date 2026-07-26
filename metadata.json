@@ -1,0 +1,6 @@
+{
+  "name": "Buttons Fashion",
+  "description": "A premium ready-to-wear brand dedicated to empowering women from students to corporate professionals with high-quality, confidence-boosting outfits featured in customizable styles.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
