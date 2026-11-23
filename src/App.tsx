@@ -713,6 +713,11 @@ export default function App() {
         onUpdateQuantity={handleUpdateQuantity}
         onRemoveItem={handleRemoveItem}
         onClearCart={handleClearCart}
+        onOrderCreated={(order) => {
+          setNotification({
+            msg: `Order ${order.orderNumber} successfully authenticated & dispatched! Tracking ID: ${order.trackingNumber}`
+          });
+        }}
       />
 
       {/* Active Toast notifications */}

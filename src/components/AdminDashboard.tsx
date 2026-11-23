@@ -1,7 +1,10 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import * as Icons from "lucide-react";
-import { Product, User, Incident, Role } from "../types";
+import { Product, User, Incident, Role, Order, PaymentAccount, PaymentTransaction, AdminNotification, CurrencyCode } from "../types";
+import { formatCurrency, formatDirectAmount } from "../utils/currency";
+import SuperAdminOverview from "./SuperAdminOverview";
+import UserLogsView from "./UserLogsView";
 
 // Dynamic Lucide Icon Helper
 const DynamicIcon = ({ name, className }: { name: string; className?: string }) => {
@@ -45,7 +48,33 @@ export default function AdminDashboard({
   onUpdateIncidents,
   onRefreshAll
 }: AdminDashboardProps) {
-  const [activeTab, setActiveTab] = useState<"catalog" | "customers" | "incidents">("catalog");
+  const [activeTab, setActiveTab] = useState<"overview" | "logs" | "transactions" | "accounts" | "catalog" | "customers" | "incidents" | "orders">("overview");
+  
+  // Orders & Transactions States
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [transactions, setTransactions] = useState<PaymentTransaction[]>([]);
+  const [paymentAccounts, setPaymentAccounts] = useState<PaymentAccount[]>([]);
+  const [adminNotifications, setAdminNotifications] = useState<AdminNotification[]>([]);
+  
+  const [isLoadingOrders, setIsLoadingOrders] = useState(false);
+  const [isLoadingTransactions, setIsLoadingTransactions] = useState(false);
+  const [isLoadingAccounts, setIsLoadingAccounts] = useState(false);
+  const [actionSuccessMsg, setActionSuccessMsg] = useState<string | null>(null);
+
+  // --- PAYMENT ACCOUNT FORM STATE ---
+  const [showAddAccount, setShowAddAccount] = useState(false);
+  const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
+  const [accountForm, setAccountForm] = useState({
+    currency: "NGN" as CurrencyCode,
+    accountType: "bank_transfer" as "bank_transfer" | "wire_transfer" | "paypal" | "other",
+    bankName: "",
+    accountNumber: "",
+    accountName: "",
+    routingOrSwift: "",
+    instructions: "",
+    isPrimary: false,
+    isActive: true
+  });
 
   // --- CATALOG CRUD STATE ---
   const [showAddProduct, setShowAddProduct] = useState(false);
@@ -72,6 +101,232 @@ export default function AdminDashboard({
     phone: "",
     customSize: ""
   });
+
+  // Fetch all payment accounts
+  const fetchAccounts = async () => {
+    setIsLoadingAccounts(true);
+    try {
+      const res = await fetch("/api/payment-accounts");
+      if (res.ok) {
+        const data = await res.json();
+        setPaymentAccounts(data);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsLoadingAccounts(false);
+    }
+  };
+
+  // Fetch all transactions
+  const fetchTransactions = async () => {
+    setIsLoadingTransactions(true);
+    try {
+      const res = await fetch("/api/transactions");
+      if (res.ok) {
+        const data = await res.json();
+        setTransactions(data);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsLoadingTransactions(false);
+    }
+  };
+
+  // Fetch all orders
+  const fetchOrders = async () => {
+    setIsLoadingOrders(true);
+    try {
+      const res = await fetch("/api/orders");
+      if (res.ok) {
+        const data = await res.json();
+        setOrders(data);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsLoadingOrders(false);
+    }
+  };
+
+  // Fetch notifications
+  const fetchNotifications = async () => {
+    try {
+      const res = await fetch("/api/admin-notifications");
+      if (res.ok) {
+        const data = await res.json();
+        setAdminNotifications(data);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  // Initial & Poll Data
+  useEffect(() => {
+    fetchAccounts();
+    fetchTransactions();
+    fetchOrders();
+    fetchNotifications();
+
+    const interval = setInterval(() => {
+      fetchTransactions();
+      fetchNotifications();
+      fetchOrders();
+    }, 4000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const pendingTransactions = transactions.filter(t => t.status === "pending");
+
+  // Show transient toast
+  const showToast = (msg: string) => {
+    setActionSuccessMsg(msg);
+    setTimeout(() => setActionSuccessMsg(null), 4000);
+  };
+
+  // ==========================================
+  // TRANSACTION CONFIRMATION ACTIONS
+  // ==========================================
+  const handleConfirmTransaction = async (txn: PaymentTransaction) => {
+    try {
+      const res = await fetch("/api/confirm-transaction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          transactionId: txn.id,
+          adminEmail: "sunshinekolawole1@gmail.com"
+        })
+      });
+      if (res.ok) {
+        showToast(`✅ Transaction Ref ${txn.reference} for ${txn.userName} CONFIRMED! Customer can now proceed to delivery.`);
+        fetchTransactions();
+        fetchOrders();
+        fetchNotifications();
+      }
+    } catch (err) {
+      console.error("Failed to confirm transaction:", err);
+    }
+  };
+
+  const handleRejectTransaction = async (txn: PaymentTransaction) => {
+    const reason = prompt("Enter rejection reason (e.g. 'Credit not received in bank ledger'):", "Payment alert could not be matched with bank statements.");
+    if (reason === null) return;
+
+    try {
+      const res = await fetch("/api/reject-transaction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          transactionId: txn.id,
+          reason,
+          adminEmail: "sunshinekolawole1@gmail.com"
+        })
+      });
+      if (res.ok) {
+        showToast(`Transaction Ref ${txn.reference} rejected.`);
+        fetchTransactions();
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  // ==========================================
+  // PAYMENT ACCOUNTS CRUD
+  // ==========================================
+  const handleSaveAccount = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!accountForm.bankName || !accountForm.accountNumber || !accountForm.accountName) {
+      alert("Please fill in Bank Name, Account Number, and Account Name.");
+      return;
+    }
+
+    try {
+      if (editingAccountId) {
+        const res = await fetch(`/api/payment-accounts/${editingAccountId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(accountForm)
+        });
+        if (res.ok) {
+          showToast("Payment account updated successfully.");
+        }
+      } else {
+        const res = await fetch("/api/payment-accounts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(accountForm)
+        });
+        if (res.ok) {
+          showToast("New payment account added successfully.");
+        }
+      }
+
+      fetchAccounts();
+      setShowAddAccount(false);
+      setEditingAccountId(null);
+      setAccountForm({
+        currency: "NGN",
+        accountType: "bank_transfer",
+        bankName: "",
+        accountNumber: "",
+        accountName: "",
+        routingOrSwift: "",
+        instructions: "",
+        isPrimary: false,
+        isActive: true
+      });
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleEditAccount = (acc: PaymentAccount) => {
+    setEditingAccountId(acc.id);
+    setAccountForm({
+      currency: acc.currency,
+      accountType: acc.accountType,
+      bankName: acc.bankName,
+      accountNumber: acc.accountNumber,
+      accountName: acc.accountName,
+      routingOrSwift: acc.routingOrSwift || "",
+      instructions: acc.instructions || "",
+      isPrimary: !!acc.isPrimary,
+      isActive: acc.isActive
+    });
+    setShowAddAccount(true);
+  };
+
+  const handleDeleteAccount = async (id: string) => {
+    if (!window.confirm("Are you sure you want to remove this payment account?")) return;
+    try {
+      const res = await fetch(`/api/payment-accounts/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        showToast("Payment account removed.");
+        fetchAccounts();
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleToggleAccountActive = async (acc: PaymentAccount) => {
+    try {
+      const res = await fetch(`/api/payment-accounts/${acc.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ isActive: !acc.isActive })
+      });
+      if (res.ok) {
+        fetchAccounts();
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
 
   // ==========================================
   // CATALOG OPERATIONS
@@ -239,72 +494,710 @@ export default function AdminDashboard({
   return (
     <div className="bg-white rounded-none border-2 border-black p-6 md:p-8 font-sans">
       
+      {/* Toast alert message */}
+      <AnimatePresence>
+        {actionSuccessMsg && (
+          <motion.div
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className="mb-6 p-4 bg-emerald-600 text-white font-mono text-xs flex items-center justify-between shadow-lg"
+          >
+            <div className="flex items-center gap-2">
+              <Icons.CheckCircle2 className="h-5 w-5 text-emerald-200 shrink-0" />
+              <span>{actionSuccessMsg}</span>
+            </div>
+            <button
+              onClick={() => setActionSuccessMsg(null)}
+              className="text-white hover:text-emerald-200 bg-transparent border-none cursor-pointer"
+            >
+              <Icons.X className="h-4 w-4" />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Pending Transactions Alert Banner */}
+      {pendingTransactions.length > 0 && (
+        <div className="mb-6 p-4 bg-amber-500 text-black border-2 border-black shadow-md flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 font-mono">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 bg-black text-amber-400 flex items-center justify-center font-bold">
+              <Icons.BellRing className="h-4 w-4 animate-bounce" />
+            </div>
+            <div>
+              <div className="text-xs font-black uppercase tracking-wider">
+                {pendingTransactions.length} PENDING TRANSACTION{pendingTransactions.length > 1 ? "S" : ""} REQUIRING CONFIRMATION!
+              </div>
+              <div className="text-[10px] text-zinc-900 font-sans mt-0.5">
+                Customers have reported payment. Notifications dispatched to <strong>sunshinekolawole1@gmail.com</strong>.
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={() => setActiveTab("transactions")}
+            className="bg-black hover:bg-zinc-800 text-white px-3 py-2 text-[10px] font-mono font-bold uppercase tracking-wider border-none cursor-pointer flex items-center gap-1.5 shrink-0"
+          >
+            <Icons.CheckSquare className="h-3.5 w-3.5" />
+            Review &amp; Confirm Now
+          </button>
+        </div>
+      )}
+
       {/* Admin Title Banner */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-[#EFEFEF] pb-6 mb-8">
         <div>
           <h2 className="text-xl md:text-2xl font-serif font-bold italic text-black flex items-center gap-2.5">
-            <Icons.ShieldAlert className="h-5 w-5 text-black" />
-            Registry & Catalog Desk
+            <Icons.ShieldCheck className="h-5 w-5 text-black" />
+            Super Admin Control Center
           </h2>
           <p className="text-gray-400 text-[10px] mt-1.5 uppercase tracking-widest font-mono">
-            Catalog visibility, Customer Standing, and active incident response
+            Direct Account Management, Live Payment Approvals, and Dispatched Orders
           </p>
         </div>
 
-        <button
-          onClick={onRefreshAll}
-          className="flex items-center gap-2 bg-black hover:bg-[#000000]/90 text-white px-4 py-2.5 rounded-none border border-black text-[9px] font-mono tracking-widest uppercase font-bold cursor-pointer transition-colors"
-        >
-          <Icons.RefreshCw className="h-3 w-3" />
-          Synchronize Store Data
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => {
+              onRefreshAll();
+              fetchAccounts();
+              fetchTransactions();
+              fetchOrders();
+              showToast("All databases synchronized with server!");
+            }}
+            className="flex items-center gap-2 bg-black hover:bg-[#000000]/90 text-white px-4 py-2.5 rounded-none border border-black text-[9px] font-mono tracking-widest uppercase font-bold cursor-pointer transition-colors"
+          >
+            <Icons.RefreshCw className="h-3 w-3" />
+            Synchronize Store Data
+          </button>
+        </div>
       </div>
 
       {/* Primary Navigation Tabs */}
-      <div className="flex flex-wrap gap-1 p-1 bg-[#F5F5F5] border border-black rounded-none mb-8 max-w-lg">
+      <div className="flex flex-wrap gap-1 p-1 bg-[#F5F5F5] border border-black rounded-none mb-8">
+        
+        {/* Executive Dashboard Tab */}
+        <button
+          onClick={() => setActiveTab("overview")}
+          className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-none text-[9px] font-mono font-bold tracking-widest uppercase transition-all cursor-pointer ${
+            activeTab === "overview"
+              ? "bg-black text-white"
+              : "text-gray-500 hover:text-black hover:bg-white/10"
+          }`}
+        >
+          <Icons.BarChart3 className="h-3.5 w-3.5 text-amber-400" />
+          <span>Dashboard</span>
+        </button>
+
+        {/* User Activity Logs Tab */}
+        <button
+          onClick={() => setActiveTab("logs")}
+          className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-none text-[9px] font-mono font-bold tracking-widest uppercase transition-all cursor-pointer ${
+            activeTab === "logs"
+              ? "bg-black text-white"
+              : "text-gray-500 hover:text-black hover:bg-white/10"
+          }`}
+        >
+          <Icons.History className="h-3.5 w-3.5 text-indigo-400" />
+          <span>User Logs</span>
+        </button>
+
+        {/* Approvals & Transactions Tab */}
+        <button
+          onClick={() => setActiveTab("transactions")}
+          className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-none text-[9px] font-mono font-bold tracking-widest uppercase transition-all cursor-pointer relative ${
+            activeTab === "transactions"
+              ? "bg-black text-white"
+              : "text-gray-500 hover:text-black hover:bg-white/10"
+          }`}
+        >
+          <Icons.CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+          <span>Approvals &amp; Txns</span>
+          {pendingTransactions.length > 0 && (
+            <span className="bg-amber-400 text-black px-1.5 py-0.2 text-[8px] font-mono font-black animate-pulse">
+              {pendingTransactions.length}
+            </span>
+          )}
+        </button>
+
+        {/* Payment Accounts Tab */}
+        <button
+          onClick={() => setActiveTab("accounts")}
+          className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-none text-[9px] font-mono font-bold tracking-widest uppercase transition-all cursor-pointer ${
+            activeTab === "accounts"
+              ? "bg-black text-white"
+              : "text-gray-500 hover:text-black hover:bg-white/10"
+          }`}
+        >
+          <Icons.Landmark className="h-3.5 w-3.5" />
+          <span>Accounts ({paymentAccounts.length})</span>
+        </button>
+
+        {/* Catalog Registry Tab */}
         <button
           onClick={() => setActiveTab("catalog")}
-          className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-none text-[9px] font-mono font-bold tracking-widest uppercase transition-all cursor-pointer ${
+          className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-none text-[9px] font-mono font-bold tracking-widest uppercase transition-all cursor-pointer ${
             activeTab === "catalog"
               ? "bg-black text-white"
-              : "text-gray-400 hover:text-black hover:bg-white/10"
+              : "text-gray-500 hover:text-black hover:bg-white/10"
           }`}
         >
           <Icons.LayoutGrid className="h-3.5 w-3.5" />
-          Catalog Registry ({products.length})
+          <span>Catalog ({products.length})</span>
         </button>
+
+        {/* Customers Tab */}
         <button
           onClick={() => setActiveTab("customers")}
-          className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-none text-[9px] font-mono font-bold tracking-widest uppercase transition-all cursor-pointer ${
+          className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-none text-[9px] font-mono font-bold tracking-widest uppercase transition-all cursor-pointer ${
             activeTab === "customers"
               ? "bg-black text-white"
-              : "text-gray-400 hover:text-black hover:bg-white/10"
+              : "text-gray-500 hover:text-black hover:bg-white/10"
           }`}
         >
           <Icons.Users className="h-3.5 w-3.5" />
-          Customers ({users.length})
+          <span>Customers ({users.length})</span>
         </button>
+
+        {/* Complaints Tab */}
         <button
           onClick={() => setActiveTab("incidents")}
-          className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-none text-[9px] font-mono font-bold tracking-widest uppercase transition-all cursor-pointer relative ${
+          className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-none text-[9px] font-mono font-bold tracking-widest uppercase transition-all cursor-pointer relative ${
             activeTab === "incidents"
               ? "bg-black text-white"
-              : "text-gray-400 hover:text-black hover:bg-white/10"
+              : "text-gray-500 hover:text-black hover:bg-white/10"
           }`}
         >
           <Icons.HeartPulse className="h-3.5 w-3.5" />
-          Complaints
+          <span>Complaints</span>
           {incidents.filter(i => i.status === 'pending').length > 0 && (
-            <span className="absolute -top-1 -right-1 bg-black text-white border border-white text-[8px] w-4.5 h-4.5 flex items-center justify-center font-bold font-mono">
+            <span className="bg-black text-white border border-white text-[8px] px-1 font-bold font-mono">
               {incidents.filter(i => i.status === 'pending').length}
             </span>
           )}
         </button>
+
+        {/* Orders Tab */}
+        <button
+          onClick={() => setActiveTab("orders")}
+          className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-none text-[9px] font-mono font-bold tracking-widest uppercase transition-all cursor-pointer relative ${
+            activeTab === "orders"
+              ? "bg-black text-white"
+              : "text-gray-500 hover:text-black hover:bg-white/10"
+          }`}
+        >
+          <Icons.PackageCheck className="h-3.5 w-3.5" />
+          <span>Dispatches ({orders.length})</span>
+        </button>
       </div>
 
       <AnimatePresence mode="wait">
+        
         {/* ======================================================== */}
-        {/* CATALOG PANEL */}
+        {/* TAB 0: EXECUTIVE DASHBOARD INTELLIGENCE */}
+        {/* ======================================================== */}
+        {activeTab === "overview" && (
+          <motion.div
+            key="overview-tab"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+          >
+            <SuperAdminOverview
+              onNavigateTab={(tab) => setActiveTab(tab)}
+              onRefresh={onRefreshAll}
+            />
+          </motion.div>
+        )}
+
+        {/* ======================================================== */}
+        {/* TAB 0.5: USER LOGIN & ACTIVITY AUDIT LOGS */}
+        {/* ======================================================== */}
+        {activeTab === "logs" && (
+          <motion.div
+            key="logs-tab"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+          >
+            <UserLogsView onRefresh={onRefreshAll} />
+          </motion.div>
+        )}
+
+        
+        {/* ======================================================== */}
+        {/* TAB 1: APPROVALS & TRANSACTIONS (PENDING CONFIRMATIONS) */}
+        {/* ======================================================== */}
+        {activeTab === "transactions" && (
+          <motion.div
+            key="transactions-tab"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            className="space-y-6"
+          >
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+              <div>
+                <h3 className="text-lg font-bold text-black uppercase tracking-wider font-mono flex items-center gap-2">
+                  <span>Payment Ledger &amp; Live Approvals</span>
+                  {pendingTransactions.length > 0 && (
+                    <span className="bg-amber-400 text-black px-2 py-0.5 text-[9px] font-mono font-black uppercase tracking-widest">
+                      {pendingTransactions.length} Pending Approval
+                    </span>
+                  )}
+                </h3>
+                <p className="text-xs text-gray-500 mt-0.5 font-sans">
+                  Review customer &quot;I have made payment&quot; submissions and click <strong>Confirm Transaction</strong> to release deliveries.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={fetchTransactions}
+                  className="bg-black hover:bg-zinc-800 text-white font-mono text-[9px] font-bold uppercase tracking-wider px-3 py-2 border-none cursor-pointer flex items-center gap-1"
+                >
+                  <Icons.RefreshCw className="h-3 w-3" /> Refresh Ledger
+                </button>
+              </div>
+            </div>
+
+            {/* Pending Approvals Section */}
+            <div className="space-y-4">
+              <h4 className="text-xs font-black uppercase tracking-wider text-black font-mono flex items-center gap-2 border-b border-black pb-2">
+                <span className="w-2.5 h-2.5 bg-amber-500 inline-block" />
+                <span>Pending Super Admin Action ({pendingTransactions.length})</span>
+              </h4>
+
+              {pendingTransactions.length === 0 ? (
+                <div className="p-8 text-center border border-dashed border-gray-300 bg-[#FAF9FA] font-mono text-xs text-gray-500">
+                  <Icons.CheckCircle2 className="h-8 w-8 mx-auto text-emerald-600 mb-2" />
+                  <p className="font-bold text-black uppercase">All Customer Payments Are Fully Cleared</p>
+                  <p className="text-[11px] font-sans text-gray-500 mt-1">
+                    When a client clicks &quot;I have made payment&quot; on checkout, it will trigger an instant alert here and dispatch an email notification to sunshinekolawole1@gmail.com.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {pendingTransactions.map(txn => (
+                    <div
+                      key={txn.id}
+                      className="border-2 border-amber-500 bg-white p-5 space-y-4 font-mono text-xs shadow-md"
+                    >
+                      {/* Top Header */}
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-amber-200">
+                        <div className="flex items-center gap-2">
+                          <span className="bg-amber-500 text-black font-black px-2 py-0.5 text-[9px] uppercase tracking-widest">
+                            PENDING CONFIRMATION
+                          </span>
+                          <span className="bg-black text-white px-2 py-0.5 text-[9px] font-bold uppercase tracking-widest">
+                            Ref: {txn.reference}
+                          </span>
+                          <span className="text-gray-500 text-[10px]">
+                            Order #{txn.orderNumber}
+                          </span>
+                        </div>
+                        <span className="text-gray-500 text-[10px]">
+                          Reported: {new Date(txn.createdAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}
+                        </span>
+                      </div>
+
+                      {/* Transaction Grid */}
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        <div className="space-y-1">
+                          <span className="text-[9px] text-gray-400 uppercase tracking-widest block">Customer Details</span>
+                          <div className="font-bold text-black text-xs">{txn.userName}</div>
+                          <div className="text-gray-600 text-[11px] font-sans">{txn.userEmail}</div>
+                          {txn.userPhone && <div className="text-gray-500 text-[10px]">{txn.userPhone}</div>}
+                        </div>
+
+                        <div className="space-y-1">
+                          <span className="text-[9px] text-gray-400 uppercase tracking-widest block">Transferred Amount</span>
+                          <div className="text-base font-black text-emerald-700">
+                            {formatDirectAmount(txn.amount, txn.currency)}
+                          </div>
+                          <div className="text-[10px] text-gray-500">
+                            {txn.itemsCount} piece(s) ({txn.itemsSummary})
+                          </div>
+                        </div>
+
+                        <div className="space-y-1">
+                          <span className="text-[9px] text-gray-400 uppercase tracking-widest block">Beneficiary Account Credited</span>
+                          <div className="font-bold text-black text-xs">{txn.paymentAccountDetails.bankName}</div>
+                          <div className="text-black font-mono text-[11px]">Acc: <strong>{txn.paymentAccountDetails.accountNumber}</strong></div>
+                          <div className="text-[10px] text-gray-500">{txn.paymentAccountDetails.accountName}</div>
+                        </div>
+                      </div>
+
+                      {/* Customer proof memo if any */}
+                      {txn.proofNote && (
+                        <div className="p-2.5 bg-zinc-50 border border-gray-200 text-[11px] text-zinc-800">
+                          <span className="font-bold text-black uppercase text-[9px] block">Customer Transfer Note / Reference:</span>
+                          <span className="font-sans italic">&quot;{txn.proofNote}&quot;</span>
+                        </div>
+                      )}
+
+                      {/* Email Alert Log */}
+                      <div className="p-2 bg-amber-50/70 border border-amber-200 text-[10px] text-amber-900 flex items-center justify-between">
+                        <span className="flex items-center gap-1.5">
+                          <Icons.Mail className="h-3.5 w-3.5 text-amber-700" />
+                          <span>Notification Email dispatched to: <strong>sunshinekolawole1@gmail.com</strong> &amp; Super Admins</span>
+                        </span>
+                        <span className="text-[8px] bg-amber-200 px-1.5 py-0.5 font-bold uppercase">Status: Dispatched</span>
+                      </div>
+
+                      {/* Super Admin Action Buttons */}
+                      <div className="flex flex-col sm:flex-row items-center justify-end gap-2 pt-2 border-t border-gray-100">
+                        <button
+                          type="button"
+                          onClick={() => handleRejectTransaction(txn)}
+                          className="w-full sm:w-auto bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300 font-mono font-bold text-[10px] px-4 py-2.5 uppercase tracking-wider cursor-pointer"
+                        >
+                          Reject / Not Found
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleConfirmTransaction(txn)}
+                          className="w-full sm:w-auto bg-emerald-700 hover:bg-emerald-800 text-white font-mono font-bold text-xs px-6 py-3 uppercase tracking-widest border-none cursor-pointer shadow-md transition-all flex items-center justify-center gap-2"
+                        >
+                          <Icons.CheckCircle2 className="h-4 w-4 text-emerald-300" />
+                          <span>Confirm Transaction</span>
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Historic Cleared Transactions */}
+            <div className="space-y-4 pt-6">
+              <h4 className="text-xs font-black uppercase tracking-wider text-black font-mono flex items-center gap-2 border-b border-black pb-2">
+                <span className="w-2.5 h-2.5 bg-black inline-block" />
+                <span>Confirmed &amp; Processed Ledger ({transactions.filter(t => t.status !== "pending").length})</span>
+              </h4>
+
+              {transactions.filter(t => t.status !== "pending").length === 0 ? (
+                <p className="text-xs text-gray-400 font-mono">No historical transactions logged yet.</p>
+              ) : (
+                <div className="space-y-2">
+                  {transactions.filter(t => t.status !== "pending").map(txn => (
+                    <div
+                      key={txn.id}
+                      className="p-3.5 border border-gray-300 bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs font-mono"
+                    >
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className={`px-1.5 py-0.5 text-[8px] font-bold uppercase ${
+                            txn.status === "confirmed" ? "bg-emerald-100 text-emerald-800" : "bg-rose-100 text-rose-800"
+                          }`}>
+                            {txn.status}
+                          </span>
+                          <span className="font-bold text-black">{txn.reference}</span>
+                          <span className="text-gray-400">({txn.userName})</span>
+                        </div>
+                        <div className="text-[10px] text-gray-500 mt-1">
+                          {formatDirectAmount(txn.amount, txn.currency)} • Paid into: {txn.paymentAccountDetails.bankName} ({txn.paymentAccountDetails.accountNumber})
+                        </div>
+                      </div>
+
+                      <div className="text-right text-[10px] text-gray-400">
+                        <div>Confirmed by: {txn.confirmedBy || "Super Admin"}</div>
+                        <div>{txn.confirmedAt ? new Date(txn.confirmedAt).toLocaleDateString() : ""}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </motion.div>
+        )}
+
+        {/* ======================================================== */}
+        {/* TAB 2: PAYMENT ACCOUNTS CONFIGURATION (SUPER ADMIN CRUD) */}
+        {/* ======================================================== */}
+        {activeTab === "accounts" && (
+          <motion.div
+            key="accounts-tab"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            className="space-y-6"
+          >
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-[#F9F9F9] p-5 border border-[#EFEFEF] rounded-none gap-4">
+              <div>
+                <h4 className="font-serif italic font-bold text-sm text-black">
+                  Official Atelier Payment Accounts
+                </h4>
+                <p className="text-gray-450 text-[10px] uppercase font-mono tracking-wider mt-1">
+                  Manage bank details and payout accounts presented to patrons during checkout (Naira &amp; Global).
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  setShowAddAccount(!showAddAccount);
+                  setEditingAccountId(null);
+                  setAccountForm({
+                    currency: "NGN",
+                    accountType: "bank_transfer",
+                    bankName: "",
+                    accountNumber: "",
+                    accountName: "",
+                    routingOrSwift: "",
+                    instructions: "",
+                    isPrimary: false,
+                    isActive: true
+                  });
+                }}
+                className="bg-black hover:bg-[#000000]/90 text-white font-bold text-[9px] tracking-widest font-mono uppercase px-4 py-3 rounded-none transition-colors cursor-pointer flex items-center gap-2 border-none"
+              >
+                {showAddAccount ? <Icons.X className="h-3 w-3" /> : <Icons.Plus className="h-3 w-3" />}
+                {showAddAccount ? "CLOSE FORM" : "ADD PAYMENT ACCOUNT"}
+              </button>
+            </div>
+
+            {/* Account Creation / Edit Form Modal */}
+            <AnimatePresence>
+              {showAddAccount && (
+                <motion.form
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                  onSubmit={handleSaveAccount}
+                  className="bg-white border-2 border-black p-6 space-y-4 font-mono text-xs overflow-hidden"
+                >
+                  <div className="flex justify-between items-center border-b border-black pb-2">
+                    <h5 className="font-black uppercase text-black">
+                      {editingAccountId ? "Edit Payment Account" : "Register New Payment Account"}
+                    </h5>
+                    <span className="text-[10px] text-gray-500 font-sans">Visible in checkout dropdown</span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="text-[10px] uppercase font-bold text-gray-700 block mb-1">Currency *</label>
+                      <select
+                        value={accountForm.currency}
+                        onChange={(e) => setAccountForm({ ...accountForm, currency: e.target.value as CurrencyCode })}
+                        className="w-full bg-[#FAF9FA] border border-gray-300 p-2.5 text-xs text-black"
+                      >
+                        <option value="NGN">NGN (₦) - Nigerian Naira</option>
+                        <option value="USD">USD ($) - US Dollar</option>
+                        <option value="EUR">EUR (€) - Euro</option>
+                        <option value="GBP">GBP (£) - British Pound</option>
+                        <option value="CAD">CAD ($) - Canadian Dollar</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-[10px] uppercase font-bold text-gray-700 block mb-1">Account Category</label>
+                      <select
+                        value={accountForm.accountType}
+                        onChange={(e) => setAccountForm({ ...accountForm, accountType: e.target.value as any })}
+                        className="w-full bg-[#FAF9FA] border border-gray-300 p-2.5 text-xs text-black"
+                      >
+                        <option value="bank_transfer">Direct Bank Transfer</option>
+                        <option value="wire_transfer">Wire Transfer / ACH</option>
+                        <option value="paypal">PayPal Merchant Account</option>
+                        <option value="other">Other Settlement Channel</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-[10px] uppercase font-bold text-gray-700 block mb-1">Bank / Platform Name *</label>
+                      <input
+                        type="text"
+                        value={accountForm.bankName}
+                        onChange={(e) => setAccountForm({ ...accountForm, bankName: e.target.value })}
+                        placeholder="e.g. Providus Bank / JPMorgan Chase"
+                        className="w-full bg-[#FAF9FA] border border-gray-300 p-2.5 text-xs text-black"
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-[10px] uppercase font-bold text-gray-700 block mb-1">Account Number / IBAN / PayPal Email *</label>
+                      <input
+                        type="text"
+                        value={accountForm.accountNumber}
+                        onChange={(e) => setAccountForm({ ...accountForm, accountNumber: e.target.value })}
+                        placeholder="e.g. 8034567891 or payments@buttons-atelier.com"
+                        className="w-full bg-[#FAF9FA] border border-gray-300 p-2.5 text-xs text-black"
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-[10px] uppercase font-bold text-gray-700 block mb-1">Account Name / Beneficiary *</label>
+                      <input
+                        type="text"
+                        value={accountForm.accountName}
+                        onChange={(e) => setAccountForm({ ...accountForm, accountName: e.target.value })}
+                        placeholder="BUTTONS FASHION ATELIER ENTERPRISES"
+                        className="w-full bg-[#FAF9FA] border border-gray-300 p-2.5 text-xs text-black"
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-[10px] uppercase font-bold text-gray-700 block mb-1">Routing / Sort Code / SWIFT (Optional)</label>
+                      <input
+                        type="text"
+                        value={accountForm.routingOrSwift}
+                        onChange={(e) => setAccountForm({ ...accountForm, routingOrSwift: e.target.value })}
+                        placeholder="Routing: 021000021 | SWIFT: CHASUS33"
+                        className="w-full bg-[#FAF9FA] border border-gray-300 p-2.5 text-xs text-black"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-[10px] uppercase font-bold text-gray-700 block mb-1">Customer Instructions (Optional)</label>
+                      <input
+                        type="text"
+                        value={accountForm.instructions}
+                        onChange={(e) => setAccountForm({ ...accountForm, instructions: e.target.value })}
+                        placeholder="e.g. Include your Reference Code in transfer description"
+                        className="w-full bg-[#FAF9FA] border border-gray-300 p-2.5 text-xs text-black"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-6 pt-2">
+                    <label className="flex items-center gap-2 cursor-pointer text-xs">
+                      <input
+                        type="checkbox"
+                        checked={accountForm.isPrimary}
+                        onChange={(e) => setAccountForm({ ...accountForm, isPrimary: e.target.checked })}
+                      />
+                      <span>Set as Primary Account for {accountForm.currency}</span>
+                    </label>
+
+                    <label className="flex items-center gap-2 cursor-pointer text-xs">
+                      <input
+                        type="checkbox"
+                        checked={accountForm.isActive}
+                        onChange={(e) => setAccountForm({ ...accountForm, isActive: e.target.checked })}
+                      />
+                      <span>Active &amp; Display in Checkout</span>
+                    </label>
+                  </div>
+
+                  <div className="flex justify-end gap-2 pt-3 border-t border-gray-200">
+                    <button
+                      type="button"
+                      onClick={() => setShowAddAccount(false)}
+                      className="px-4 py-2 border border-gray-300 text-gray-600 font-mono text-[10px] uppercase cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      className="bg-black hover:bg-zinc-800 text-white px-6 py-2.5 font-mono text-[10px] font-bold uppercase tracking-wider border-none cursor-pointer"
+                    >
+                      {editingAccountId ? "Save Changes" : "Create Account"}
+                    </button>
+                  </div>
+                </motion.form>
+              )}
+            </AnimatePresence>
+
+            {/* List of Accounts Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {paymentAccounts.map(acc => (
+                <div
+                  key={acc.id}
+                  className={`p-5 border bg-white space-y-3 font-mono text-xs transition-all ${
+                    acc.isActive ? "border-black shadow-xs" : "border-gray-200 opacity-60 bg-gray-50"
+                  }`}
+                >
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="bg-black text-white px-2 py-0.5 text-[9px] font-bold uppercase">
+                          {acc.currency}
+                        </span>
+                        <span className="text-xs font-bold text-black uppercase">{acc.bankName}</span>
+                      </div>
+                      <span className="text-[10px] text-gray-500 uppercase block mt-1">
+                        Type: {acc.accountType.replace("_", " ")}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      {acc.isPrimary && (
+                        <span className="bg-emerald-100 text-emerald-800 px-2 py-0.5 text-[8px] font-bold uppercase">
+                          Primary
+                        </span>
+                      )}
+                      <span className={`px-2 py-0.5 text-[8px] font-bold uppercase ${
+                        acc.isActive ? "bg-black text-white" : "bg-gray-200 text-gray-600"
+                      }`}>
+                        {acc.isActive ? "Active" : "Disabled"}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Account Details Box */}
+                  <div className="bg-[#FAF9FA] p-3 border border-gray-200 space-y-1">
+                    <div className="flex justify-between items-center">
+                      <span className="text-[9px] text-gray-400 uppercase">Account Number:</span>
+                      <span className="font-black text-black tracking-wider">{acc.accountNumber}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-[9px] text-gray-400 uppercase">Beneficiary:</span>
+                      <span className="text-black text-[11px] font-bold">{acc.accountName}</span>
+                    </div>
+                    {acc.routingOrSwift && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-[9px] text-gray-400 uppercase">Routing / SWIFT:</span>
+                        <span className="text-gray-700 text-[10px]">{acc.routingOrSwift}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {acc.instructions && (
+                    <div className="text-[10px] text-gray-500 font-sans italic">
+                      &quot;{acc.instructions}&quot;
+                    </div>
+                  )}
+
+                  {/* Action footer */}
+                  <div className="flex items-center justify-between pt-2 border-t border-gray-100">
+                    <button
+                      type="button"
+                      onClick={() => handleToggleAccountActive(acc)}
+                      className="text-[10px] font-mono text-gray-600 hover:text-black uppercase bg-transparent border-none cursor-pointer"
+                    >
+                      {acc.isActive ? "Deactivate" : "Activate"}
+                    </button>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleEditAccount(acc)}
+                        className="text-[10px] font-mono font-bold text-black hover:text-magenta uppercase bg-transparent border-none cursor-pointer flex items-center gap-1"
+                      >
+                        <Icons.Edit2 className="h-3 w-3" /> Edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteAccount(acc.id)}
+                        className="text-[10px] font-mono font-bold text-rose-600 hover:text-rose-800 uppercase bg-transparent border-none cursor-pointer flex items-center gap-1"
+                      >
+                        <Icons.Trash2 className="h-3 w-3" /> Delete
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        )}
+
+        {/* ======================================================== */}
+        {/* TAB 3: CATALOG REGISTRY */}
         {/* ======================================================== */}
         {activeTab === "catalog" && (
           <motion.div
@@ -316,7 +1209,7 @@ export default function AdminDashboard({
           >
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-[#F9F9F9] p-5 border border-[#EFEFEF] rounded-none gap-4">
               <div>
-                <h4 className="font-serif italic font-bold text-sm text-black">Add a New Button to Catalog</h4>
+                <h4 className="font-serif italic font-bold text-sm text-black">Add a New Piece to Atelier Catalog</h4>
                 <p className="text-gray-450 text-[10px] uppercase font-mono tracking-wider mt-1">Define standards, retail pricing, and customized iconography.</p>
               </div>
               <button
@@ -328,259 +1221,128 @@ export default function AdminDashboard({
               </button>
             </div>
 
-            {/* Create form slide */}
-            {showAddProduct && (
-              <form onSubmit={handleCreateProduct} className="bg-white p-6 rounded-none border-2 border-black grid grid-cols-1 md:grid-cols-2 gap-5">
-                <div className="space-y-1">
-                  <label className="text-[10px] font-mono font-bold text-gray-500 uppercase tracking-widest">Garment Name *</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="e.g. Eco-Sprout Linen Trench Coat"
-                    value={productForm.name}
-                    onChange={(e) => setProductForm({ ...productForm, name: e.target.value })}
-                    className="w-full bg-white border border-black rounded-none px-3.5 py-2.5 text-xs focus:outline-none placeholder-gray-400 font-sans"
-                  />
-                </div>
+            {/* Add Product Form */}
+            <AnimatePresence>
+              {showAddProduct && (
+                <motion.form
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                  onSubmit={handleCreateProduct}
+                  className="bg-white border-2 border-black p-6 space-y-4 overflow-hidden rounded-none"
+                >
+                  <h4 className="font-serif italic font-bold text-base text-black">New Atelier Garment Definition</h4>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-[9px] font-mono uppercase tracking-widest text-black mb-1">Product Title *</label>
+                      <input
+                        type="text"
+                        required
+                        value={productForm.name}
+                        onChange={(e) => setProductForm({ ...productForm, name: e.target.value })}
+                        placeholder="e.g. Buttons Couture Obsidian Corset"
+                        className="w-full bg-[#FAFAFA] border border-black p-3 text-xs text-black placeholder:text-gray-400 focus:outline-hidden rounded-none font-mono"
+                      />
+                    </div>
 
-                <div className="space-y-1">
-                  <label className="text-[10px] font-mono font-bold text-gray-500 uppercase tracking-widest">Standard Price ($) *</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0.01"
-                    required
-                    placeholder="e.g. 120.00"
-                    value={productForm.price}
-                    onChange={(e) => setProductForm({ ...productForm, price: e.target.value })}
-                    className="w-full bg-white border border-black rounded-none px-3.5 py-2.5 text-xs focus:outline-none placeholder-gray-400 font-mono"
-                  />
-                </div>
+                    <div>
+                      <label className="block text-[9px] font-mono uppercase tracking-widest text-black mb-1">Retail Price ($ USD) *</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        required
+                        value={productForm.price}
+                        onChange={(e) => setProductForm({ ...productForm, price: e.target.value })}
+                        placeholder="145.00"
+                        className="w-full bg-[#FAFAFA] border border-black p-3 text-xs text-black placeholder:text-gray-400 focus:outline-hidden rounded-none font-mono"
+                      />
+                    </div>
+                  </div>
 
-                <div className="space-y-1 md:col-span-2">
-                  <label className="text-[10px] font-mono font-bold text-gray-500 uppercase tracking-widest">Garment Description / Sustainability Specs</label>
-                  <textarea
-                    rows={2}
-                    placeholder="Describe the fabric specs, drape weights, fit details, or tailored composition of this item..."
-                    value={productForm.description}
-                    onChange={(e) => setProductForm({ ...productForm, description: e.target.value })}
-                    className="w-full bg-white border border-black rounded-none px-3.5 py-2.5 text-xs focus:outline-none placeholder-gray-400 resize-none font-sans"
-                  />
-                </div>
+                  <div>
+                    <label className="block text-[9px] font-mono uppercase tracking-widest text-black mb-1">Description & Material Composition</label>
+                    <textarea
+                      rows={3}
+                      value={productForm.description}
+                      onChange={(e) => setProductForm({ ...productForm, description: e.target.value })}
+                      placeholder="Hand-woven tailoring, sustainable silk & organic linen blend..."
+                      className="w-full bg-[#FAFAFA] border border-black p-3 text-xs text-black placeholder:text-gray-400 focus:outline-hidden rounded-none font-mono"
+                    />
+                  </div>
 
-                <div className="space-y-1">
-                  <label className="text-[10px] font-mono font-bold text-gray-500 uppercase tracking-widest">Category</label>
-                  <select
-                    value={productForm.category}
-                    onChange={(e) => setProductForm({ ...productForm, category: e.target.value })}
-                    className="w-full bg-white border border-black rounded-none h-[42px] px-3.5 py-2 text-xs focus:outline-none font-sans cursor-pointer"
-                  >
-                    <option>Outerwear</option>
-                    <option>Basics</option>
-                    <option>Knitwear</option>
-                  </select>
-                </div>
+                  <div className="flex justify-end gap-3 pt-4 border-t border-[#EFEFEF]">
+                    <button
+                      type="button"
+                      onClick={() => setShowAddProduct(false)}
+                      className="px-4 py-2.5 border border-black text-black font-mono text-[9px] uppercase tracking-widest font-bold bg-transparent cursor-pointer rounded-none"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-6 py-2.5 bg-black hover:bg-[#000000]/90 text-white font-mono text-[9px] uppercase tracking-widest font-bold border-none cursor-pointer rounded-none"
+                    >
+                      Publish to Registry
+                    </button>
+                  </div>
+                </motion.form>
+              )}
+            </AnimatePresence>
 
-                <div className="space-y-1">
-                  <label className="text-[10px] font-mono font-bold text-gray-500 uppercase tracking-widest">Choose Fallback Theme Icon</label>
-                  <div className="flex flex-wrap gap-1.5 p-2 bg-[#F9F9F9] rounded-none border border-gray-250 max-h-[100px] overflow-y-auto">
-                    {ICON_OPTIONS.map(ico => (
-                      <button
-                        key={ico}
-                        type="button"
-                        onClick={() => setProductForm({ ...productForm, iconName: ico })}
-                        className={`p-2 rounded-none border transition-all text-xs shrink-0 flex items-center justify-center ${
-                          productForm.iconName === ico 
-                            ? "bg-black text-white border-black" 
-                            : "bg-white text-black border-gray-200 hover:bg-[#F5F5F5]"
-                        }`}
-                        title={ico}
-                      >
-                        <DynamicIcon name={ico} className="h-4 w-4" />
-                      </button>
-                    ))}
+            {/* Catalog Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {products.map(product => (
+                <div
+                  key={product.id}
+                  className={`border border-black p-4 flex flex-col justify-between transition-all rounded-none bg-white ${
+                    !product.isVisible ? "opacity-50 border-dashed" : ""
+                  }`}
+                >
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-start">
+                      <span className="text-[8px] font-mono font-bold uppercase tracking-widest px-2 py-0.5 border border-black bg-[#F5F5F5] text-black">
+                        {product.category}
+                      </span>
+                      <span className="font-mono font-bold text-xs text-black">
+                        ${product.price.toFixed(2)}
+                      </span>
+                    </div>
+
+                    <h5 className="font-serif italic font-bold text-sm text-black line-clamp-1">{product.name}</h5>
+                    <p className="text-gray-400 text-[10px] font-mono line-clamp-2">{product.description}</p>
+                  </div>
+
+                  <div className="pt-4 border-t border-[#EFEFEF] mt-4 flex items-center justify-between">
+                    <button
+                      onClick={() => handleToggleVisibility(product)}
+                      className={`text-[8px] font-mono uppercase tracking-widest px-2.5 py-1 font-bold border cursor-pointer ${
+                        product.isVisible
+                          ? "border-black bg-black text-white"
+                          : "border-gray-400 text-gray-400 bg-transparent"
+                      }`}
+                    >
+                      {product.isVisible ? "Visible in Store" : "Hidden"}
+                    </button>
+
+                    <button
+                      onClick={() => {
+                        const newP = prompt("Enter new USD price:", product.price.toString());
+                        if (newP) handleUpdatePrice(product.id, parseFloat(newP));
+                      }}
+                      className="text-[9px] font-mono uppercase underline text-black hover:text-magenta bg-transparent border-none cursor-pointer"
+                    >
+                      Edit Price
+                    </button>
                   </div>
                 </div>
-
-                <div className="space-y-1 md:col-span-2">
-                  <label className="text-[10px] font-mono font-bold text-gray-500 uppercase tracking-widest">Garment Image URL (Preferred)</label>
-                  <input
-                    type="url"
-                    placeholder="e.g. https://images.unsplash.com/photo-1591047139829-d91aecb6caea?q=80&w=600"
-                    value={productForm.imageUrl}
-                    onChange={(e) => setProductForm({ ...productForm, imageUrl: e.target.value })}
-                    className="w-full bg-white border border-black rounded-none px-3.5 py-2.5 text-xs focus:outline-none placeholder-gray-400 font-sans"
-                  />
-                  <p className="text-[9px] text-gray-400 leading-none pl-0.5">Input an Unsplash/web image hotlink to render instead of fallback vector icons.</p>
-                </div>
-
-                <div className="space-y-1 md:col-span-2">
-                  <label className="text-[10px] font-mono font-bold text-gray-500 uppercase tracking-widest block mb-1.5">Garment Sizes to Stock *</label>
-                  <div className="flex flex-wrap gap-2">
-                    {["XS", "S", "M", "L", "XL", "XXL"].map((sz) => {
-                      const active = productForm.sizes.includes(sz);
-                      return (
-                        <button
-                          key={sz}
-                          type="button"
-                          onClick={() => {
-                            const updated = active
-                              ? productForm.sizes.filter(x => x !== sz)
-                              : [...productForm.sizes, sz];
-                            setProductForm({ ...productForm, sizes: updated });
-                          }}
-                          className={`w-10 h-10 border text-xs font-mono font-bold flex items-center justify-center transition-all ${
-                            active
-                              ? "bg-magenta border-magenta text-white shadow-sm"
-                              : "border-black/25 text-black bg-white hover:border-black"
-                          }`}
-                        >
-                          {sz}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div className="space-y-1 md:col-span-2">
-                  <label className="text-[10px] font-mono font-bold text-gray-500 uppercase tracking-widest">Color Association Code</label>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-1">
-                    {ACCENT_OPTIONS.map(opt => (
-                      <button
-                        key={opt.value}
-                        type="button"
-                        onClick={() => setProductForm({ ...productForm, accentColor: opt.value })}
-                        className={`p-3 rounded-none border text-[10px] font-bold uppercase tracking-wider flex items-center gap-2 transition-all ${
-                          productForm.accentColor === opt.value
-                            ? "ring-2 ring-black ring-offset-1 scale-[1.01] bg-black text-white border-black"
-                            : "bg-white text-black border-gray-200 hover:bg-[#F5F5F5]"
-                        }`}
-                      >
-                        <span className="w-2.5 h-2.5 rounded-full bg-current" />
-                        {opt.name}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="md:col-span-2 pt-3 flex justify-end">
-                  <button
-                    type="submit"
-                    className="bg-magenta hover:bg-magenta-hover text-white font-mono font-bold text-[10px] tracking-widest uppercase py-3.5 px-6 rounded-none transition-all cursor-pointer border-none shadow-none"
-                  >
-                    Add Couture piece To inventory
-                  </button>
-                </div>
-              </form>
-            )}
-
-             {/* Products Inventory list */}
-            <div className="bg-white border-2 border-black rounded-none overflow-hidden overflow-x-auto">
-              <table className="w-full text-left border-collapse text-xs">
-                <thead>
-                  <tr className="bg-black text-white font-mono font-bold text-[9px] tracking-widest uppercase border-b border-black">
-                    <th className="p-4">Visual Art / Image</th>
-                    <th className="p-4">Name & Category</th>
-                    <th className="p-4">Standard Price</th>
-                    <th className="p-4">Student Price (20% off)</th>
-                    <th className="p-4">Status State</th>
-                    <th className="p-4 text-right">Settings</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#EFEFEF]">
-                  {products.map((prod) => {
-                    const themedStyle = ACCENT_OPTIONS.find(a => a.value === prod.accentColor)?.bg || "bg-magenta-light text-magenta border-magenta/20";
-                    return (
-                      <tr key={prod.id} className="hover:bg-[#F9F9F9] transition-colors">
-                        <td className="p-4">
-                          {prod.imageUrl ? (
-                            <img
-                              src={prod.imageUrl}
-                              alt={prod.name}
-                              className="w-12 h-12 object-cover border border-black/10 shadow-xs"
-                              referrerPolicy="no-referrer"
-                            />
-                          ) : (
-                            <div className={`w-12 h-12 rounded-full border flex items-center justify-center p-2.5 shadow-sm shrink-0 ${themedStyle}`}>
-                              <DynamicIcon name={prod.iconName} className="h-6 w-6" />
-                            </div>
-                          )}
-                        </td>
-                        <td className="p-4">
-                          <div className="font-bold text-black">{prod.name}</div>
-                          <div className="text-[9px] text-gray-400 font-bold font-mono tracking-widest uppercase mt-0.5">{prod.category}</div>
-                          {prod.sizes && prod.sizes.length > 0 && (
-                            <div className="flex gap-1 mt-1">
-                              {prod.sizes.map(sz => (
-                                <span key={sz} className="text-[8px] font-mono bg-gray-100 text-gray-600 px-1 py-0.2">{sz}</span>
-                              ))}
-                            </div>
-                          )}
-                        </td>
-                        <td className="p-4 font-mono">
-                          {editingProductId === prod.id ? (
-                            <input
-                              type="number"
-                              step="0.01"
-                              className="w-20 bg-white border-2 border-black rounded-none p-1.5 text-xs font-bold focus:outline-none"
-                              defaultValue={prod.price}
-                              onBlur={(e) => handleUpdatePrice(prod.id, Number(e.target.value))}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") {
-                                  handleUpdatePrice(prod.id, Number((e.target as HTMLInputElement).value));
-                                }
-                              }}
-                              autoFocus
-                            />
-                          ) : (
-                            <span className="font-bold text-black">${prod.price.toFixed(2)}</span>
-                          )}
-                        </td>
-                        <td className="p-4 font-mono">
-                          <span className="font-bold text-magenta">${(prod.price * 0.8).toFixed(2)}</span>
-                        </td>
-                        <td className="p-4">
-                          <button
-                            onClick={() => handleToggleVisibility(prod)}
-                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-none text-[9px] font-mono tracking-widest uppercase font-bold border cursor-pointer transition-all ${
-                              prod.isVisible
-                                ? "bg-black text-white border-black"
-                                : "bg-white text-gray-400 border-gray-250 hover:border-black hover:text-black"
-                            }`}
-                          >
-                            {prod.isVisible ? (
-                              <>
-                                <Icons.Eye className="h-3.5 w-3.5" />
-                                Live Registry
-                              </>
-                            ) : (
-                              <>
-                                <Icons.EyeOff className="h-3.5 w-3.5 text-gray-400" />
-                                Shelved
-                              </>
-                            )}
-                          </button>
-                        </td>
-                        <td className="p-4 text-right">
-                          <button
-                            onClick={() => setEditingProductId(editingProductId === prod.id ? null : prod.id)}
-                            className="bg-white hover:bg-black hover:text-white text-black p-2.5 rounded-none border border-black text-xs font-semibold cursor-pointer transition-colors"
-                            title="Edit Price"
-                          >
-                            <Icons.Edit3 className="h-3.5 w-3.5" />
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+              ))}
             </div>
           </motion.div>
         )}
 
         {/* ======================================================== */}
-        {/* CUSTOMERS PANEL */}
+        {/* TAB 4: CUSTOMERS */}
         {/* ======================================================== */}
         {activeTab === "customers" && (
           <motion.div
@@ -592,225 +1354,68 @@ export default function AdminDashboard({
           >
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-[#F9F9F9] p-5 border border-[#EFEFEF] rounded-none gap-4">
               <div>
-                <h4 className="font-serif italic font-bold text-sm text-black">Add a New Customer to Store</h4>
-                <p className="text-gray-450 text-[10px] uppercase font-mono tracking-wider mt-1">Define permissions, default role types, and system credentials.</p>
+                <h4 className="font-serif italic font-bold text-sm text-black">Customer Standing &amp; Accounts</h4>
+                <p className="text-gray-450 text-[10px] uppercase font-mono tracking-wider mt-1">Manage verified patrons, student privilege discounts, and conditions.</p>
               </div>
               <button
                 onClick={() => setShowAddCustomer(!showAddCustomer)}
                 className="bg-black hover:bg-[#000000]/90 text-white font-bold text-[9px] tracking-widest font-mono uppercase px-4 py-3 rounded-none transition-colors cursor-pointer flex items-center gap-2 border-none"
               >
                 {showAddCustomer ? <Icons.X className="h-3 w-3" /> : <Icons.Plus className="h-3 w-3" />}
-                {showAddCustomer ? "CLOSE FORM" : "ADD PROFILE"}
+                {showAddCustomer ? "CLOSE FORM" : "ADD CLIENT ACCOUNT"}
               </button>
             </div>
 
-            {/* Create form customer slide */}
-            {showAddCustomer && (
-              <form onSubmit={handleCreateCustomer} className="bg-white p-6 rounded-none border-2 border-black grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div className="space-y-1">
-                  <label className="text-[10px] font-mono font-bold text-gray-500 uppercase tracking-widest">Client Username *</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="e.g. Rachel Foster"
-                    value={customerForm.username}
-                    onChange={(e) => setCustomerForm({ ...customerForm, username: e.target.value })}
-                    className="w-full bg-white border border-black rounded-none px-3.5 py-2.5 text-xs focus:outline-none font-sans"
-                  />
-                </div>
+            {/* Customer List */}
+            <div className="space-y-3">
+              {users.map(u => (
+                <div
+                  key={u.id}
+                  className="p-4 border border-black flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white"
+                >
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-black text-xs font-mono">{u.username}</span>
+                      <span className={`px-2 py-0.5 text-[8px] font-mono uppercase font-bold ${
+                        u.role === "super_user"
+                          ? "bg-black text-white"
+                          : u.role === "student"
+                          ? "bg-magenta text-white"
+                          : "bg-gray-200 text-black"
+                      }`}>
+                        {u.role.replace("_", " ")}
+                      </span>
+                      <span className="text-emerald-700 text-[9px] font-mono">
+                        [{u.statusCondition || "Good Standing"}]
+                      </span>
+                    </div>
+                    <div className="text-gray-500 text-[10px] font-mono mt-1">{u.email} {u.phone ? `• ${u.phone}` : ""}</div>
+                  </div>
 
-                <div className="space-y-1">
-                  <label className="text-[10px] font-mono font-bold text-gray-500 uppercase tracking-widest">Client Email *</label>
-                  <input
-                    type="email"
-                    required
-                    placeholder="e.g. rachel@university.edu"
-                    value={customerForm.email}
-                    onChange={(e) => setCustomerForm({ ...customerForm, email: e.target.value })}
-                    className="w-full bg-white border border-black rounded-none px-3.5 py-2.5 text-xs focus:outline-none font-sans"
-                  />
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => handleUpdateUserCondition(u.id, u.statusCondition || "Good Standing")}
+                      className="text-[9px] font-mono uppercase text-black hover:underline bg-transparent border-none cursor-pointer"
+                    >
+                      Update Standing
+                    </button>
+                    <button
+                      onClick={() => handleToggleUserActive(u)}
+                      className={`px-2 py-1 text-[8px] font-mono uppercase font-bold border cursor-pointer ${
+                        u.isActive ? "border-black text-black" : "border-rose-500 text-rose-500"
+                      }`}
+                    >
+                      {u.isActive ? "Active" : "Suspended"}
+                    </button>
+                  </div>
                 </div>
-
-                <div className="space-y-1">
-                  <label className="text-[10px] font-mono font-bold text-gray-500 uppercase tracking-widest">Select User Role</label>
-                  <select
-                    value={customerForm.role}
-                    onChange={(e) => setCustomerForm({ ...customerForm, role: e.target.value as Role })}
-                    className="w-full bg-white border border-black rounded-none h-[42px] px-3.5 py-2 text-xs focus:outline-none font-sans cursor-pointer"
-                  >
-                    <option value="student">Student Class (-20% discount applied)</option>
-                    <option value="non_student">Standard Class (Standard pricing)</option>
-                    <option value="super_user">Super User Authority</option>
-                  </select>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[10px] font-mono font-bold text-gray-500 uppercase tracking-widest">Access Password *</label>
-                  <input
-                    type="password"
-                    required
-                    placeholder="Default user password"
-                    value={customerForm.password}
-                    onChange={(e) => setCustomerForm({ ...customerForm, password: e.target.value })}
-                    className="w-full bg-white border border-black rounded-none px-3.5 py-2.5 text-xs focus:outline-none font-mono"
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[10px] font-mono font-bold text-gray-500 uppercase tracking-widest">Phone Number</label>
-                  <input
-                    type="tel"
-                    placeholder="e.g. +1 555-0199"
-                    value={customerForm.phone}
-                    onChange={(e) => setCustomerForm({ ...customerForm, phone: e.target.value })}
-                    className="w-full bg-white border border-black rounded-none px-3.5 py-2.5 text-xs focus:outline-none font-sans"
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[10px] font-mono font-bold text-gray-500 uppercase tracking-widest">Default Fitted Size</label>
-                  <select
-                    value={customerForm.customSize}
-                    onChange={(e) => setCustomerForm({ ...customerForm, customSize: e.target.value })}
-                    className="w-full bg-white border border-black rounded-none h-[42px] px-3.5 py-2 text-xs focus:outline-none font-sans cursor-pointer"
-                  >
-                    <option value="">-- No Calibration --</option>
-                    <option value="6">Size 6</option>
-                    <option value="8">Size 8</option>
-                    <option value="10">Size 10</option>
-                    <option value="12">Size 12</option>
-                    <option value="14">Size 14</option>
-                    <option value="16">Size 16</option>
-                    <option value="18">Size 18</option>
-                    <option value="20">Size 20</option>
-                    <option value="22">Size 22</option>
-                    <option value="24">Size 24</option>
-                  </select>
-                </div>
-
-                <div className="md:col-span-3 pt-3 flex justify-end">
-                  <button
-                    type="submit"
-                    className="bg-black hover:bg-[#000000]/90 text-white font-mono font-bold text-[10px] tracking-widest uppercase py-3.5 px-6 rounded-none transition-all cursor-pointer border-none shadow-none"
-                  >
-                    Register Customer Profile
-                  </button>
-                </div>
-              </form>
-            )}
-
-            {/* Customers Registry list */}
-            <div className="bg-white border-2 border-black rounded-none overflow-hidden overflow-x-auto">
-              <table className="w-full text-left border-collapse text-xs">
-                <thead>
-                  <tr className="bg-black text-white font-mono font-bold text-[9px] tracking-widest uppercase border-b border-black">
-                    <th className="p-4">Customer identity</th>
-                    <th className="p-4">Secure Email</th>
-                    <th className="p-4">Registered Class</th>
-                    <th className="p-4">Standing Condition</th>
-                    <th className="p-4">System State</th>
-                    <th className="p-4 text-right">Direct Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#EFEFEF]">
-                  {users.map((item) => {
-                    const isRoleSuper = item.role === 'super_user';
-                    const isRoleStudent = item.role === 'student';
-                    return (
-                      <tr key={item.id} className="hover:bg-[#F9F9F9] transition-colors">
-                        <td className="p-4 font-bold text-black">
-                          <div className="flex items-center gap-2.5">
-                            {item.picture ? (
-                              <img
-                                src={item.picture}
-                                alt={item.username}
-                                className="w-8 h-8 rounded-full object-cover border border-black shadow-inner"
-                                referrerPolicy="no-referrer"
-                              />
-                            ) : (
-                              <span className="w-8 h-8 rounded-full bg-[#000000] text-white font-mono font-bold flex items-center justify-center text-xs uppercase shadow-inner">
-                                {item.username.charAt(0)}
-                              </span>
-                            )}
-                            <div className="flex flex-col">
-                              <span>{item.username}</span>
-                              {item.phone && (
-                                <span className="text-[10px] text-gray-400 font-mono font-normal">
-                                  📞 {item.phone}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        </td>
-                        <td className="p-4 text-gray-500 font-mono">{item.email}</td>
-                        <td className="p-4">
-                          <div className="flex flex-col items-start gap-1">
-                            <span className={`px-2 py-0.5 rounded-none text-[8px] font-mono font-bold uppercase tracking-widest border leading-none ${
-                              isRoleSuper 
-                                ? "bg-black text-white border-black" 
-                                : isRoleStudent 
-                                  ? "bg-white text-black border-black" 
-                                  : "bg-white text-gray-500 border-gray-200"
-                            }`}>
-                              {item.role.replace('_', ' ')}
-                            </span>
-                            {item.customSize && (
-                              <span className="text-[9px] font-mono bg-[#FAF0FF] text-[#9C00BF] border border-[#9C00BF]/20 px-1.5 py-0.5 leading-none">
-                                Size: {item.customSize}
-                              </span>
-                            )}
-                          </div>
-                        </td>
-                        <td className="p-4 font-mono text-[10px] uppercase">
-                          <div className="flex items-center gap-1.5">
-                            <span className={`w-1.5 h-1.5 rounded-full ${item.statusCondition?.includes('Good') ? 'bg-black' : 'bg-red-500'}`} />
-                            <span className="text-black font-bold">{item.statusCondition || "Good Standing"}</span>
-                          </div>
-                        </td>
-                        <td className="p-4">
-                          <button
-                            onClick={() => handleToggleUserActive(item)}
-                            className={`px-3 py-1 rounded-none text-[9px] font-mono tracking-widest uppercase font-bold border transition-colors cursor-pointer ${
-                              item.isActive 
-                                ? "bg-black text-white border-black" 
-                                : "bg-white text-red-655 border-red-500 font-bold hover:bg-red-50"
-                            }`}
-                          >
-                            {item.isActive ? "Authorized" : "Suspended"}
-                          </button>
-                        </td>
-                        <td className="p-4 text-right space-x-1.5">
-                          <button
-                            onClick={() => handleUpdateUserCondition(item.id, item.statusCondition || "")}
-                            className="bg-white hover:bg-black hover:text-white text-black p-2 rounded-none border border-black text-xs font-semibold cursor-pointer transition-colors"
-                            title="Set Condition Message"
-                          >
-                            <Icons.AlertCircle className="h-3.5 w-3.5" />
-                          </button>
-                          <button
-                            onClick={() => handleRemoveCustomer(item.id)}
-                            disabled={isRoleSuper}
-                            className={`p-2 rounded-none border text-xs font-semibold transition-colors ${
-                              isRoleSuper 
-                                ? "bg-gray-100 text-gray-300 border-gray-200 cursor-not-allowed" 
-                                : "bg-white hover:bg-red-500 hover:text-white text-red-600 border-red-500 cursor-pointer"
-                            }`}
-                            title="Remove Customer Account Directly"
-                          >
-                            <Icons.UserMinus className="h-3.5 w-3.5" />
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+              ))}
             </div>
           </motion.div>
         )}
 
         {/* ======================================================== */}
-        {/* INCIDENTS PANEL */}
+        {/* TAB 5: COMPLAINTS */}
         {/* ======================================================== */}
         {activeTab === "incidents" && (
           <motion.div
@@ -818,110 +1423,150 @@ export default function AdminDashboard({
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
+            className="space-y-4"
+          >
+            {incidents.length === 0 ? (
+              <p className="text-xs text-gray-500 font-mono">No customer complaints filed.</p>
+            ) : (
+              incidents.map(inc => (
+                <div key={inc.id} className="p-4 border border-black bg-white space-y-2 font-mono text-xs">
+                  <div className="flex justify-between items-center">
+                    <span className="font-bold text-black uppercase">{inc.subject}</span>
+                    <span className={`px-2 py-0.5 text-[8px] font-bold uppercase ${
+                      inc.status === "pending" ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"
+                    }`}>
+                      {inc.status}
+                    </span>
+                  </div>
+                  <p className="text-gray-600 font-sans text-xs">{inc.description}</p>
+                  <div className="flex justify-between items-center pt-2 text-[10px] text-gray-400">
+                    <span>Filed by: {inc.username}</span>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => handleUpdateIncidentStatus(inc.id, "reviewed")}
+                        className="text-black hover:underline bg-transparent border-none cursor-pointer"
+                      >
+                        Mark Reviewed
+                      </button>
+                      <button
+                        onClick={() => handleUpdateIncidentStatus(inc.id, "resolved")}
+                        className="text-emerald-700 font-bold hover:underline bg-transparent border-none cursor-pointer"
+                      >
+                        Resolve
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
+          </motion.div>
+        )}
+
+        {/* ======================================================== */}
+        {/* TAB 6: DISPATCHES & ORDERS */}
+        {/* ======================================================== */}
+        {activeTab === "orders" && (
+          <motion.div
+            key="orders-tab"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
             className="space-y-6"
           >
-            <div className="bg-[#F5F5F5] p-5 border border-black rounded-none">
-              <h4 className="font-serif italic font-bold text-sm text-black flex items-center gap-2">
-                <Icons.Sparkles className="h-4 w-4 text-black" />
-                Live Customer Complaints Register
-              </h4>
-              <p className="text-gray-550 text-[10px] uppercase font-mono tracking-wider mt-1.5">
-                Incidents published by accounts through our interactive Button Buddy Assistant dashboard dynamically.
-              </p>
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+              <div>
+                <h3 className="text-lg font-bold text-black uppercase tracking-wider font-mono">
+                  Atelier Dispatched Orders &amp; Waybills
+                </h3>
+                <p className="text-xs text-gray-500 mt-0.5 font-sans">
+                  Real-time customer transactions, payment authentication logs, and delivery routing.
+                </p>
+              </div>
             </div>
 
-            {incidents.length === 0 ? (
-              <div className="p-12 text-center bg-[#F9F9F9] border border-dashed border-black rounded-none space-y-3">
-                <Icons.CheckCircle2 className="h-8 w-8 text-black mx-auto" />
-                <h4 className="font-serif italic font-bold text-base text-black">Perfect Integrity</h4>
-                <p className="text-gray-400 text-xs leading-relaxed max-w-sm mx-auto">No client complaints currently reported inside database logs. Live assistance is fully clear.</p>
+            {isLoadingOrders ? (
+              <div className="p-12 text-center text-xs font-mono text-gray-400">
+                <Icons.Loader2 className="h-5 w-5 animate-spin mx-auto mb-2 text-black" />
+                <span>Loading latest orders registry...</span>
+              </div>
+            ) : orders.length === 0 ? (
+              <div className="p-12 text-center border border-dashed border-gray-300 space-y-2 bg-[#FAF9FA]">
+                <Icons.PackageCheck className="h-8 w-8 mx-auto text-gray-400" />
+                <h4 className="text-xs font-black uppercase tracking-wider text-black font-mono">No Orders Placed Yet</h4>
+                <p className="text-xs text-gray-500 font-sans">Customer orders authenticated through Naira Bank Transfer or Global Wire will appear here with live waybill tracking details.</p>
               </div>
             ) : (
-              <div className="grid grid-cols-1 gap-4">
-                {incidents.map((inc) => {
-                  const isPending = inc.status === 'pending';
-                  const isReviewed = inc.status === 'reviewed';
-                  const isResolved = inc.status === 'resolved';
+              <div className="space-y-4">
+                {orders.map(ord => (
+                  <div key={ord.id} className="border border-black p-5 bg-white space-y-4 font-mono text-xs shadow-xs">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-gray-200">
+                      <div className="flex items-center gap-2">
+                        <span className="bg-black text-white px-2 py-0.5 text-[9px] font-bold tracking-widest uppercase">
+                          {ord.orderNumber}
+                        </span>
+                        <span className="px-2 py-0.5 text-[9px] font-bold tracking-widest uppercase bg-emerald-50 text-emerald-800 border border-emerald-300">
+                          {ord.paymentMethod === "naira_bank_transfer" ? "🇳🇬 Direct Naira Transfer" : "🌐 Global Transfer"}
+                        </span>
+                        <span className="px-2 py-0.5 text-[9px] font-bold tracking-widest uppercase bg-emerald-100 text-emerald-900 border border-emerald-300">
+                          {ord.paymentStatus}
+                        </span>
+                      </div>
+                      <span className="text-gray-400 text-[10px]">
+                        {new Date(ord.createdAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}
+                      </span>
+                    </div>
 
-                  return (
-                    <div key={inc.id} className={`p-5 rounded-none border-2 transition-all ${
-                      isPending 
-                        ? "bg-white border-black"
-                        : isReviewed 
-                          ? "bg-[#F9F9F9] border-gray-400"
-                          : "bg-gray-50 border-gray-200"
-                    }`}>
-                      <div className="flex flex-col sm:flex-row justify-between items-start gap-4">
-                        <div className="space-y-2">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="bg-black text-white text-[8px] font-mono font-bold tracking-widest px-2 py-0.5 rounded-none">
-                              {inc.id.toUpperCase()}
-                            </span>
-                            <span className="text-[8px] font-mono font-bold uppercase tracking-widest px-2 py-0.5 rounded-none border border-black bg-white text-black">
-                              {inc.category} Category
-                            </span>
-                            <span className={`text-[8px] font-mono font-bold uppercase tracking-widest px-2 py-0.5 rounded-none border ${
-                              isPending 
-                                ? "bg-red-50 text-red-750 border-red-500 animate-pulse" 
-                                : isReviewed 
-                                  ? "bg-yellow-50 text-yellow-800 border-yellow-500" 
-                                  : "bg-black text-white border-black"
-                            }`}>
-                              {inc.status}
-                            </span>
-                          </div>
+                    {/* Customer & Destination */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div className="space-y-1">
+                        <span className="text-[9px] text-gray-400 uppercase tracking-widest block">Recipient &amp; Contact</span>
+                        <div className="text-black font-bold">{ord.deliveryDetails.fullName} ({ord.deliveryDetails.phone})</div>
+                        <div className="text-gray-500 text-[11px] font-sans">{ord.userEmail}</div>
+                      </div>
 
-                          <h3 className="text-base font-serif italic font-bold text-black pt-1">{inc.subject}</h3>
-                          
-                          <p className="text-black text-xs whitespace-pre-line bg-[#F9F9F9] p-4 rounded-none border border-gray-200 font-mono leading-relaxed">
-                            {inc.description}
-                          </p>
-
-                          <div className="flex flex-wrap items-center gap-1.5 pt-1 text-[9px] font-mono tracking-widest uppercase text-gray-450 font-bold">
-                            <Icons.User className="h-3.5 w-3.5 text-black shrink-0" />
-                            <span>Sender: <strong className="text-black font-black">{inc.username}</strong></span>
-                            <span>•</span>
-                            <span className="text-black">{inc.userRole.replace('_', ' ')} status</span>
-                            <span>•</span>
-                            <span>{new Date(inc.createdAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</span>
-                          </div>
+                      <div className="space-y-1">
+                        <span className="text-[9px] text-gray-400 uppercase tracking-widest block">Delivery Destination</span>
+                        <div className="text-black font-sans text-xs">
+                          {ord.deliveryDetails.address}{ord.deliveryDetails.apartment ? `, ${ord.deliveryDetails.apartment}` : ""}, {ord.deliveryDetails.city}, {ord.deliveryDetails.state}, {ord.deliveryDetails.country}
                         </div>
-
-                        {/* Status Change controls */}
-                        <div className="shrink-0 flex sm:flex-col gap-2 w-full sm:w-auto mt-2 sm:mt-0">
-                          <button
-                            onClick={() => handleUpdateIncidentStatus(inc.id, "pending")}
-                            className={`flex-1 sm:flex-none text-[9px] font-mono tracking-widest uppercase font-bold py-2 px-3.5 rounded-none border transition-colors cursor-pointer text-center ${
-                              isPending ? "bg-black text-white border-black" : "bg-white text-black hover:bg-[#F5F5F5] border-gray-300"
-                            }`}
-                          >
-                            Set Pending
-                          </button>
-                          <button
-                            onClick={() => handleUpdateIncidentStatus(inc.id, "reviewed")}
-                            className={`flex-1 sm:flex-none text-[9px] font-mono tracking-widest uppercase font-bold py-2 px-3.5 rounded-none border transition-colors cursor-pointer text-center ${
-                              isReviewed ? "bg-black text-white border-black" : "bg-white text-black hover:bg-[#F5F5F5] border-gray-300"
-                            }`}
-                          >
-                            Set Reviewed
-                          </button>
-                          <button
-                            onClick={() => handleUpdateIncidentStatus(inc.id, "resolved")}
-                            className={`flex-1 sm:flex-none text-[9px] font-mono tracking-widest uppercase font-bold py-2 px-3.5 rounded-none border transition-colors cursor-pointer text-center ${
-                              isResolved ? "bg-black text-white border-black" : "bg-white text-black hover:bg-[#F5F5F5] border-gray-300"
-                            }`}
-                          >
-                            Set Resolved
-                          </button>
-                        </div>
+                        <div className="text-gray-500 text-[10px] uppercase font-mono">Courier: {ord.deliveryDetails.deliveryOption} • Tracking: <span className="text-black font-bold">{ord.trackingNumber}</span></div>
                       </div>
                     </div>
-                  );
-                })}
+
+                    {/* Items Purchased */}
+                    <div className="bg-[#FAF9FA] p-3 border border-gray-200 space-y-1.5">
+                      <span className="text-[9px] text-gray-500 uppercase tracking-widest block font-bold">Ordered Pieces</span>
+                      {ord.items.map(item => (
+                        <div key={item.product.id} className="flex justify-between text-gray-700 text-xs">
+                          <span>{item.quantity}x {item.product.name}</span>
+                          <span className="font-bold text-black font-mono">{formatCurrency(item.product.price * item.quantity, ord.currency)}</span>
+                        </div>
+                      ))}
+                      <div className="border-t border-gray-300 pt-2 flex justify-between font-black text-black text-xs">
+                        <span>Total Settled ({ord.currency}):</span>
+                        <span>{formatCurrency(ord.total, ord.currency)}</span>
+                      </div>
+                    </div>
+
+                    {/* Transaction Reference Footer */}
+                    <div className="text-[10px] text-gray-500 flex flex-wrap items-center gap-3 pt-1">
+                      <span>Txn ID: <strong className="text-black">{ord.paymentDetails?.transactionId || "N/A"}</strong></span>
+                      <span>•</span>
+                      <span>Ref: <strong className="text-black">{ord.paymentDetails?.reference || "N/A"}</strong></span>
+                      {ord.paymentDetails?.confirmedBy && (
+                        <>
+                          <span>•</span>
+                          <span>Confirmed by: <strong className="text-black">{ord.paymentDetails.confirmedBy}</strong></span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </motion.div>
         )}
+
       </AnimatePresence>
     </div>
   );
